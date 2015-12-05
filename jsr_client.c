@@ -27,7 +27,7 @@
 #include "ext/standard/info.h"
 #include "ext/standard/basic_functions.h"
 #include "ext/standard/php_rand.h"
-#include "ext/standard/php_smart_str.h"
+#include "zend_smart_str.h"
 #include "SAPI.h"
 #include "ext/json/php_json.h"
 #include "ext/standard/file.h"
@@ -64,28 +64,29 @@ ZEND_BEGIN_ARG_INFO_EX(jsonrpc_client_dorequest_arginfo, 0, 0, 1)
 ZEND_END_ARG_INFO()
 /* }}} */
 
-static int _php_count_recursive(zval *array, long mode TSRMLS_DC) /* {{{ */
+static zend_long 
+_php_count_recursive(zval *array, zend_long mode) /* {{{ */
 {
-  long cnt = 0;
-  zval **element;
+  zend_long cnt = 0;
+  zval *element;
 
   if (Z_TYPE_P(array) == IS_ARRAY) {
-    if (Z_ARRVAL_P(array)->nApplyCount > 1) {
+    if (Z_ARRVAL_P(array)->u.v.nApplyCount > 1) {
       php_error_docref(NULL TSRMLS_CC, E_WARNING, "recursion detected");
       return 0;
     }
 
-    cnt = zend_hash_num_elements(Z_ARRVAL_P(array));
+    cnt = zend_array_count(Z_ARRVAL_P(array));
     if (mode == COUNT_RECURSIVE) {
-      HashPosition pos;
-
-      for (zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(array), &pos);
-        zend_hash_get_current_data_ex(Z_ARRVAL_P(array), (void **) &element, &pos) == SUCCESS;
-        zend_hash_move_forward_ex(Z_ARRVAL_P(array), &pos)
-      ) {
-        Z_ARRVAL_P(array)->nApplyCount++;
-        cnt += _php_count_recursive(*element, COUNT_RECURSIVE TSRMLS_CC);
-        Z_ARRVAL_P(array)->nApplyCount--;
+        if (ZEND_HASH_APPLY_PROTECTION(Z_ARRVAL_P(array))) {
+        Z_ARRVAL_P(array)->u.v.nApplyCount++;
+      }
+      ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array), element) {
+        ZVAL_DEREF(element);
+        cnt += php_count_recursive(element, COUNT_RECURSIVE);
+      } ZEND_HASH_FOREACH_END();
+        if (ZEND_HASH_APPLY_PROTECTION(Z_ARRVAL_P(array))) {
+        Z_ARRVAL_P(array)->u.v.nApplyCount--;
       }
     }
   }
@@ -103,8 +104,8 @@ _jsr_client_prepare_request(zval *procedure, zval *params, zval *custom_id TSRML
   MAKE_STD_ZVAL(payload);
   array_init(payload);
 
-  add_assoc_string(payload, "jsonrpc", "2.0", 0);
-  add_assoc_string(payload, "method", Z_STRVAL_P(procedure), 0);
+  add_assoc_string(payload, "jsonrpc", "2.0");
+  add_assoc_string(payload, "method", Z_STRVAL_P(procedure));
 
   if (Z_TYPE_P(custom_id) == IS_NULL){
     zval *id;
@@ -197,7 +198,7 @@ _write_callback(char *ptr, size_t size, size_t nmemb, void *ctx)
   zval *error;
 
   char *buffer;
-  zval **response_data;
+  zval *response_data;
   //char buffer[17*1024+1];
   //memset(buffer, 0, 17*1024+1);
 
@@ -207,9 +208,11 @@ _write_callback(char *ptr, size_t size, size_t nmemb, void *ctx)
   size_t length = size * nmemb;
   item->write_length = length;
 
+  zval rv;
+
   object = item->object;
   response = zend_read_property(
-    php_jsonrpc_client_entry, object, "response", sizeof("response")-1, 0 TSRMLS_CC
+    php_jsonrpc_client_entry, object, "response", sizeof("response")-1, 1, &rv
   );
 
   //jsr_dump_zval(response);
@@ -229,19 +232,19 @@ _write_callback(char *ptr, size_t size, size_t nmemb, void *ctx)
   if (response_code == 200){
     if (zend_hash_index_exists(Z_ARRVAL_P(response), item->response_id))
     {
-      if (zend_hash_index_find(Z_ARRVAL_P(response), item->response_id, (void **)&response_data) == SUCCESS)
+      if (NULL != (response_data = zend_hash_index_find(Z_ARRVAL_P(response), item->response_id)))
       {
-        buffer = malloc(Z_STRLEN_PP(response_data) + length + 1);
-        strncpy(buffer, Z_STRVAL_PP(response_data), Z_STRLEN_PP(response_data)+1);
+        buffer = malloc(Z_STRLEN_P(response_data) + length + 1);
+        strncpy(buffer, Z_STRVAL_P(response_data), Z_STRLEN_P(response_data)+1);
         strncat(buffer, ptr, length);
-        add_index_stringl(response, item->response_id, buffer, Z_STRLEN_PP(response_data) + length, 1);
+        add_index_stringl(response, item->response_id, buffer, Z_STRLEN_PP(response_data) + length);
         if (buffer){
           free(buffer);
           buffer = NULL;
         }
       }
     }else {
-      add_index_stringl(response, item->response_id, ptr, length, 1);
+      add_index_stringl(response, item->response_id, ptr, length);
     }
 
     zend_update_property(php_jsonrpc_client_entry, 
@@ -486,13 +489,13 @@ _php_jsr_response_error(long code, char *message, jsr_payload_id *payload_id)
   MAKE_STD_ZVAL(error);
   array_init(error);
 
-  add_assoc_string(response_tmp, "jsonrpc", "2.0", 1);
+  add_assoc_string(response_tmp, "jsonrpc", "2.0");
 
   if (payload_id){
     if (payload_id->type == IS_LONG){
       add_assoc_long(response_tmp, "id", payload_id->long_id);
     }else if (payload_id->type == IS_STRING){
-      add_assoc_string(response_tmp, "id", payload_id->char_id, 1);
+      add_assoc_string(response_tmp, "id", payload_id->char_id);
     }else {
       add_assoc_null(response_tmp, "id");
     }
@@ -501,7 +504,7 @@ _php_jsr_response_error(long code, char *message, jsr_payload_id *payload_id)
   }
 
   add_assoc_long(error, "code", code);
-  add_assoc_string(error, "message", message, 1);
+  add_assoc_string(error, "message", message);
   
   add_assoc_zval(response_tmp, "error", error);
 
@@ -581,10 +584,10 @@ _php_jsr_request_object_free_storage(void *object TSRMLS_DC)
   //php_printf("jsr_request_destroy\n");
 }
 
-static zend_object_value
+static zend_object
 _php_jsr_request_object_new(zend_class_entry *class_type TSRMLS_DC)
 {
-  zend_object_value result;
+  zend_object result;
   php_jsr_reuqest_object *jsr_request;
 #if PHP_VERSION_ID < 50399
   zval *tmp;

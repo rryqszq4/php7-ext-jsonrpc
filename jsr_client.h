@@ -77,8 +77,13 @@ static zval* _php_jsr_response_error(long code, char *message, jsr_payload_id *p
 static int _socket_callback(CURL *easy, curl_socket_t fd, int action, void *u, void *s);
 static int _timer_callback(CURLM *multi, long timeout_ms, void *u);
 
-static zend_object _php_jsr_request_object_new(zend_class_entry *class_type TSRMLS_DC);
-static void _php_jsr_request_object_free_storage(void *object TSRMLS_DC);
+static
+inline php_jsr_reuqest_object *_php_jsr_request_fetch_object(zend_object *obj) {
+  return (php_jsr_reuqest_object *)((char *)obj - XtOffsetOf(php_jsr_reuqest_object, zo));
+}
+
+static zend_object *_php_jsr_request_object_new(zend_class_entry *class_type);
+static void _php_jsr_request_object_free_storage(zend_object *object);
 
 static size_t _write_callback(char *ptr, size_t size, size_t nmemb, void *ctx);
 

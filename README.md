@@ -1,9 +1,11 @@
-JsonRPC 2.0 Client and Server
-=============================
+php7-ext-jsonrpc
+================
 
-[![Build Status](https://travis-ci.org/rryqszq4/JsonRPC.svg)](https://travis-ci.org/rryqszq4/JsonRPC)
+[![Build Status](https://travis-ci.org/rryqszq4/php7-ext-jsonrpc.svg?branch=master)](https://travis-ci.org/rryqszq4/php7-ext-jsonrpc)
 
-Lightweight, fast multi Json-RPC 2.0 client/server in php extension, base on multi_curl and epoll of the Client. Compliance [http://www.jsonrpc.org/](http://www.jsonrpc.org/) protocol specification. [中文](https://github.com/rryqszq4/JsonRPC/blob/master/README-cn.md)
+Json-RPC 2.0 client/server for php-7 extension.
+
+[php5.3~php5.6](https://github.com/rryqszq4/JsonRPC)
 
 Requirement
 -----------

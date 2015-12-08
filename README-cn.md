@@ -1,10 +1,11 @@
-JsonRPC 2.0 Client and Server
-=============================
+php7-ext-jsonrpc
+================
 
-[![Build Status](https://travis-ci.org/rryqszq4/JsonRPC.svg)](https://travis-ci.org/rryqszq4/JsonRPC)
+[![Build Status](https://travis-ci.org/rryqszq4/php7-ext-jsonrpc.svg?branch=master)](https://travis-ci.org/rryqszq4/php7-ext-jsonrpc)
 
-轻量级,高性能 JsonRPC 2.0 客户端和服务端的php扩展，基于 multi_curl + epoll的并行客户端。Jsonrpc_Client使用libcurl库的并行接口调取服务，使用IO多路复用的epoll去监听curl的IO事件。Jsonrpc_Server支持php-fpm或swoole。遵守[http://www.jsonrpc.org/](http://www.jsonrpc.org/)协议规范。
-[English](https://github.com/rryqszq4/JsonRPC/blob/master/README.md)
+JsonRPC 2.0 客户端和服务端的php-7扩展.
+
+[php5.3~php5.6](https://github.com/rryqszq4/JsonRPC)
 
 特性
 -----------

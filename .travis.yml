@@ -1,0 +1,13 @@
+language: php
+php:
+  - 7.0
+
+notifications:
+  email: false
+
+env:
+  - REPORT_EXIT_STATUS=1 NO_INTERACTION=1
+
+before_script: phpize && ./configure && make
+
+script: make test

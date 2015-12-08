@@ -184,7 +184,7 @@ PHP_MINFO_FUNCTION(jsonrpc)
 /* Every user-visible function in PHP should document itself in the source */
 /* {{{ proto string confirm_jsonrpc_compiled(string arg)
    Return a string to confirm that the module is compiled in */
-/*PHP_FUNCTION(confirm_jsonrpc_compiled)
+PHP_FUNCTION(confirm_jsonrpc_compiled)
 {
 	char *arg = NULL;
 	int arg_len, len;
@@ -195,8 +195,8 @@ PHP_MINFO_FUNCTION(jsonrpc)
 	}
 
 	len = spprintf(&strg, 0, "Congratulations! You have successfully modified ext/%.78s/config.m4. Module %.78s is now compiled into PHP.", "jsonrpc", arg);
-	RETURN_STRINGL(strg, len, 0);
-}*/
+	RETURN_STRINGL(strg, len);
+}
 /* }}} */
 /* The previous line is meant for vim and emacs, so it can correctly fold and 
    unfold functions in source code. See the corresponding marks just before 

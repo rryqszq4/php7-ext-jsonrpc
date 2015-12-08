@@ -30,6 +30,7 @@
 #include "SAPI.h"
 #include "ext/json/php_json.h"
 #include "ext/standard/file.h"
+#include "zend_smart_str.h"
 #include "zend_closures.h"
 #include "php_jsonrpc.h"
 
@@ -87,34 +88,27 @@ ZEND_BEGIN_ARG_INFO_EX(jsonrpc_server_getresponse_arginfo, 0, 0, 2)
 ZEND_END_ARG_INFO()
 /* }}} */
 
-static zval* _jsr_file_get_contents()
+static zval _jsr_file_get_contents()
 {
-  TSRMLS_FETCH();
-  
-  zval *payload;
-
-  MAKE_STD_ZVAL(payload);
+  zval payload;
 
   zend_bool use_include_path = 0;
   php_stream *stream;
-  int len;
-  long offset = -1;
-  long maxlen = PHP_STREAM_COPY_ALL;
+  zend_long offset = -1;
+  zend_long maxlen = PHP_STREAM_COPY_ALL;
   zval *zcontext = NULL;
   php_stream_context *context = NULL;
 
-  char *contents;
-
-  
+  zend_string *contents;
 
   context = php_stream_context_from_zval(zcontext, 0);
 
   stream = php_stream_open_wrapper_ex("php://input", "rb",
-        (use_include_path ? USE_PATH : 0) | ENFORCE_SAFE_MODE | REPORT_ERRORS,
+        (use_include_path ? USE_PATH : 0) | REPORT_ERRORS,
         NULL, context);
   
   if (!stream) {
-    ZVAL_NULL(payload);
+    ZVAL_NULL(&payload);
     php_stream_close(stream);
     return payload;
   }
@@ -122,53 +116,48 @@ static zval* _jsr_file_get_contents()
   if (offset > 0 && php_stream_seek(stream, offset, SEEK_SET) < 0) {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed to seek to position %ld in the stream", offset);
     php_stream_close(stream);
-    ZVAL_NULL(payload);
+    ZVAL_NULL(&payload);
     return payload;
   }
 
-  if ((len = php_stream_copy_to_mem(stream, &contents, maxlen, 0)) > 0) {
-#if PHP_API_VERSION < 20100412
-    if (PG(magic_quotes_runtime)) {
-      contents = php_addslashes(contents, len, &len, 1 TSRMLS_CC); 
-    }
-#endif
-    ZVAL_STRINGL(payload, contents, len, 1);
-    php_stream_close(stream);
-    return payload;
-  } else if (len == 0) {
-    ZVAL_STRING(payload, "", 1);
+  if (maxlen > INT_MAX) {
+    php_error_docref(NULL, E_WARNING, "maxlen truncated from %pd to %d bytes", maxlen, INT_MAX);
+    maxlen = INT_MAX;
+  }
+  if ((contents = php_stream_copy_to_mem(stream, maxlen, 0)) != NULL) {
+    ZVAL_STRING(&payload, ZSTR_VAL(contents));
     php_stream_close(stream);
     return payload;
   } else {
-    ZVAL_NULL(payload);
+    ZVAL_STRING(&payload, "");
     php_stream_close(stream);
     return payload;
   }
   
 }
 
-static int _php_count_recursive(zval *array, long mode TSRMLS_DC) /* {{{ */
+static zend_long _php_count_recursive(zval *array, zend_long mode) /* {{{ */
 {
-  long cnt = 0;
-  zval **element;
+  zend_long cnt = 0;
+  zval *element;
 
   if (Z_TYPE_P(array) == IS_ARRAY) {
-    if (Z_ARRVAL_P(array)->nApplyCount > 1) {
-      php_error_docref(NULL TSRMLS_CC, E_WARNING, "recursion detected");
+    if (Z_ARRVAL_P(array)->u.v.nApplyCount > 1) {
+      php_error_docref(NULL, E_WARNING, "recursion detected");
       return 0;
     }
 
-    cnt = zend_hash_num_elements(Z_ARRVAL_P(array));
+    cnt = zend_array_count(Z_ARRVAL_P(array));
     if (mode == COUNT_RECURSIVE) {
-      HashPosition pos;
-
-      for (zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(array), &pos);
-        zend_hash_get_current_data_ex(Z_ARRVAL_P(array), (void **) &element, &pos) == SUCCESS;
-        zend_hash_move_forward_ex(Z_ARRVAL_P(array), &pos)
-      ) {
-        Z_ARRVAL_P(array)->nApplyCount++;
-        cnt += _php_count_recursive(*element, COUNT_RECURSIVE TSRMLS_CC);
-        Z_ARRVAL_P(array)->nApplyCount--;
+        if (ZEND_HASH_APPLY_PROTECTION(Z_ARRVAL_P(array))) {
+        Z_ARRVAL_P(array)->u.v.nApplyCount++;
+      }
+      ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(array), element) {
+        ZVAL_DEREF(element);
+        cnt += php_count_recursive(element, COUNT_RECURSIVE);
+      } ZEND_HASH_FOREACH_END();
+        if (ZEND_HASH_APPLY_PROTECTION(Z_ARRVAL_P(array))) {
+        Z_ARRVAL_P(array)->u.v.nApplyCount--;
       }
     }
   }
@@ -181,8 +170,6 @@ static zval* _jsr_server_get_arguments(zval *request_params, zval *method_params
 {
   zval *retval;
   int nb_params;
-
-  MAKE_STD_ZVAL(retval);
 
   nb_params = _php_count_recursive(request_params, 0 TSRMLS_CC);
 
@@ -224,12 +211,12 @@ PHP_METHOD(jsonrpc_server, __construct)
       object, "callbacks", sizeof("callbacks")-1, callbacks TSRMLS_CC
     );
   }else {
-    MAKE_STD_ZVAL(callbacks);
-    array_init(callbacks);
+    zval tmp_callbacks;
+    array_init(&tmp_callbacks);
     zend_update_property(php_jsonrpc_server_entry,
-      object, "callbacks", sizeof("callbacks")-1, callbacks TSRMLS_CC
+      object, "callbacks", sizeof("callbacks")-1, &tmp_callbacks TSRMLS_CC
     );
-    //zval_ptr_dtor(&callbacks);
+    zval_ptr_dtor(&tmp_callbacks);
   }
 
   if (classes){
@@ -237,12 +224,12 @@ PHP_METHOD(jsonrpc_server, __construct)
       object, "classes", sizeof("classes")-1, classes TSRMLS_CC
     );
   }else {
-    MAKE_STD_ZVAL(classes);
-    array_init(classes);
+    zval tmp_class;
+    array_init(&tmp_class);
     zend_update_property(php_jsonrpc_server_entry,
-      object, "classes", sizeof("classes")-1, classes TSRMLS_CC
+      object, "classes", sizeof("classes")-1, &tmp_class TSRMLS_CC
     );
-    //zval_ptr_dtor(&classes);
+    zval_ptr_dtor(&tmp_class);
   }
 
 
@@ -251,13 +238,13 @@ PHP_METHOD(jsonrpc_server, __construct)
 PHP_METHOD(jsonrpc_server, register)
 {
   zval *closure=NULL;
-  zval *val;
+  zval val;
   zval *name;
   zval *callbacks;
   char *lcname;
   char *name_str, *tmp;
   int name_len, tmp_len;
-  zval *classname;
+  zval classname;
 
   zend_class_entry **pce;
   zend_class_entry *ce;
@@ -281,7 +268,7 @@ PHP_METHOD(jsonrpc_server, register)
       name_len--;
       }
 
-      if (zend_hash_find(EG(function_table), nsname, name_len + 1, (void **)&fptr) == FAILURE) {
+      if ((fptr = zend_hash_str_find_ptr(EG(function_table),nsname, name_len)) == NULL) { 
         efree(lcname);
         php_error_docref(NULL TSRMLS_CC, E_WARNING, 
           "Function %s() does not exist", name_str);
@@ -290,24 +277,23 @@ PHP_METHOD(jsonrpc_server, register)
       efree(lcname);
     }else {
       tmp_len = tmp - name_str;
-      MAKE_STD_ZVAL(classname);
-      ZVAL_STRINGL(classname, name_str, tmp_len, 1);
+
+      ZVAL_STRINGL(&classname, name_str, tmp_len);
       name_len = name_len - (tmp_len + 2);
       name_str = tmp + 2;
       //php_printf("classname: %s, method: %s\n", Z_STRVAL_P(classname), name_str);
-      if (zend_lookup_class(Z_STRVAL_P(classname), Z_STRLEN_P(classname), &pce TSRMLS_CC) == FAILURE) {
+      if ((ce = zend_lookup_class(Z_STR(classname))) == NULL){
         php_error_docref(NULL TSRMLS_CC, E_WARNING,
-          "Class %s does exist", Z_STRVAL_P(classname));
+          "Class %s does exist", Z_STRVAL(classname));
         //zend_throw_exception_ex(reflection_exception_ptr, 0 TSRMLS_CC,
         //    "Class %s does not exist", Z_STRVAL_P(classname)); 
-        zval_dtor(classname);
+        zval_ptr_dtor(&classname);
         return;
       }
-      ce = *pce;
 
       lcname = zend_str_tolower_dup(name_str, name_len);
 
-      if (zend_hash_find(&ce->function_table, lcname, name_len + 1, (void **) &fptr) == FAILURE) {
+      if ((fptr = zend_hash_str_find_ptr(&ce->function_table, lcname, name_len)) == NULL){
         efree(lcname);
         php_error_docref(NULL TSRMLS_CC, E_WARNING,
           "Method %s::%s() does not exist", ce->name, name_str);
@@ -322,20 +308,14 @@ PHP_METHOD(jsonrpc_server, register)
   }
 
 
+  zval rv1;
   callbacks = zend_read_property(
-    php_jsonrpc_server_entry, object, "callbacks", sizeof("callbacks")-1, 0 TSRMLS_CC
+    php_jsonrpc_server_entry, object, "callbacks", sizeof("callbacks")-1, 0, &rv1
   );
 
-  MAKE_STD_ZVAL(val);
+  zend_create_closure(&val, fptr, NULL, NULL, NULL);
 
-#if PHP_VERSION_ID < 50399
-  zend_create_closure(val, fptr TSRMLS_CC);
-#else
-  zend_create_closure(val, fptr, NULL, NULL TSRMLS_CC);
-#endif
-
-
-  add_assoc_zval(callbacks, Z_STRVAL_P(name), val);
+  add_assoc_zval(callbacks, Z_STRVAL_P(name), &val);
 
   zend_update_property(php_jsonrpc_server_entry, object, "callbacks", sizeof("callbacks")-1, callbacks TSRMLS_CC);
 
@@ -347,7 +327,7 @@ PHP_METHOD(jsonrpc_server, bind)
 {
   zval *procedure, *classname, *method;
   zval *classes;
-  zval *val;
+  zval val;
   zval *object;
 
   object = getThis();
@@ -358,22 +338,22 @@ PHP_METHOD(jsonrpc_server, bind)
     return ;
   }
 
+  zval rv2;
   classes = zend_read_property(
-    php_jsonrpc_server_entry, object, "classes", sizeof("classes")-1, 0 TSRMLS_CC
+    php_jsonrpc_server_entry, object, "classes", sizeof("classes")-1, 1, &rv2
   );
 
-  MAKE_STD_ZVAL(val);
-  array_init(val);
+  array_init(&val);
   if (Z_TYPE_P(classname) == IS_STRING){
-    add_assoc_stringl(val, "class", Z_STRVAL_P(classname), Z_STRLEN_P(classname), 1);
+    add_assoc_stringl(&val, "class", Z_STRVAL_P(classname), Z_STRLEN_P(classname));
   }else if (Z_TYPE_P(classname) == IS_OBJECT){
-    add_assoc_zval(val, "class", classname);
+    add_assoc_zval(&val, "class", classname);
   }else {
     return ;
   }
-  add_assoc_stringl(val, "method", Z_STRVAL_P(method), Z_STRLEN_P(method), 1);
+  add_assoc_stringl(&val, "method", Z_STRVAL_P(method), Z_STRLEN_P(method));
 
-  add_assoc_zval(classes, Z_STRVAL_P(procedure), val);
+  add_assoc_zval(classes, Z_STRVAL_P(procedure), &val);
 
   zend_update_property(php_jsonrpc_server_entry, object, "classes", sizeof("classes")-1, classes TSRMLS_CC);
 
@@ -383,77 +363,73 @@ PHP_METHOD(jsonrpc_server, bind)
 PHP_METHOD(jsonrpc_server, execute)
 {
   zval *object;
-  zval *func;
+  zval func;
   zval retval;
-  zval **func_params, **exec_params;
-  zval *data, *payload, *error, *id, *response;
-  zval **payload_method, **payload_params;
-  zval *return_val;
+  zval *func_params, *exec_params;
+  zval data, *payload, error, id, *response;
+  zval *payload_method, *payload_params;
+  zval return_val;
 
   object = getThis();
   
-  MAKE_STD_ZVAL(error);
-  MAKE_STD_ZVAL(id);
-  MAKE_STD_ZVAL(data);
-  array_init(error);
-  array_init(id);
-  array_init(data);
+  array_init(&error);
+  array_init(&id);
+  array_init(&data);
   
   //add_assoc_zval(response, "id", id);
 
-  INIT_ZVAL(retval);
-  MAKE_STD_ZVAL(func);
-  ZVAL_STRINGL(func, "jsonformat", sizeof("jsonformat") - 1, 0);
-  if (call_user_function(NULL, &object, func, &retval, 0, NULL TSRMLS_CC) == FAILURE){
+  ZVAL_STRINGL(&func, "jsonformat", sizeof("jsonformat") - 1);
+  if (call_user_function(NULL, object, &func, &retval, 0, NULL) == FAILURE){
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::jsonformat()");
     return ;
   }
-  if (!Z_BVAL(retval)){
-    add_assoc_long(error, "code", -32700);
-    add_assoc_string(error, "message", "Parse error", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+  if (Z_TYPE(retval) == IS_FALSE){
+    add_assoc_long(&error, "code", -32700);
+    add_assoc_string(&error, "message", "Parse error");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }
 
 
-  ZVAL_STRINGL(func, "rpcformat", sizeof("rpcformat") - 1, 0);
-  if (call_user_function(NULL, &object, func, &retval, 0, NULL TSRMLS_CC) == FAILURE){
+  ZVAL_STRINGL(&func, "rpcformat", sizeof("rpcformat") - 1);
+  if (call_user_function(NULL, object, &func, &retval, 0, NULL) == FAILURE){
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::rpcformat()");
     return ;
   }
 
   if (Z_LVAL(retval) == -32600){
-    add_assoc_long(error, "code", -32600);
-    add_assoc_string(error, "message", "Invalid Request", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+    add_assoc_long(&error, "code", -32600);
+    add_assoc_string(&error, "message", "Invalid Request");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }else if (Z_LVAL(retval) == -32601){
-    add_assoc_long(error, "code", -32601);
-    add_assoc_string(error, "message", "Method not found", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+    add_assoc_long(&error, "code", -32601);
+    add_assoc_string(&error, "message", "Method not found");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }else if (Z_LVAL(retval) == -32602){
-    add_assoc_long(error, "code", -32602);
-    add_assoc_string(error, "message", "Invalid params", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+    add_assoc_long(&error, "code", -32602);
+    add_assoc_string(&error, "message", "Invalid params");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }else if (Z_LVAL(retval) == -32603){
-    add_assoc_long(error, "code", -32603);
-    add_assoc_string(error, "message", "Internal error", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+    add_assoc_long(&error, "code", -32603);
+    add_assoc_string(&error, "message", "Internal error");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }
 
-  exec_params = emalloc(sizeof(zval *) * 2);
+  exec_params = emalloc(sizeof(zval) * 2);
+  zval rv3;
   payload = zend_read_property(
-      php_jsonrpc_server_entry, getThis(), "payload", sizeof("payload")-1, 0 TSRMLS_CC
+      php_jsonrpc_server_entry, getThis(), "payload", sizeof("payload")-1, 0, &rv3
     );
-  if (zend_hash_find(Z_ARRVAL_P(payload), "method", strlen("method")+1, (void **)&payload_method) == FAILURE)
+  if ((payload_method = zend_hash_str_find(Z_ARRVAL_P(payload), "method", sizeof("method")-1)) == NULL)
   {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "method is not find");
     return ;
@@ -461,7 +437,7 @@ PHP_METHOD(jsonrpc_server, execute)
   //jsr_dump_zval(*payload_method);
   exec_params[0] = *payload_method;
 
-  if (zend_hash_find(Z_ARRVAL_P(payload), "params", strlen("params")+1, (void **)&payload_params) == FAILURE)
+  if ((payload_params = zend_hash_str_find(Z_ARRVAL_P(payload), "params", sizeof("params")-1)) == NULL)
   {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "params is not find");
     return ;
@@ -469,43 +445,42 @@ PHP_METHOD(jsonrpc_server, execute)
   //shurrik_dump_zval(*payload_params);
   exec_params[1] = *payload_params;
 
-  MAKE_STD_ZVAL(return_val);
-  ZVAL_STRINGL(func, "executeprocedure", sizeof("executeprocedure") - 1, 0);
-  if (call_user_function(NULL, &object, func, return_val, 2, exec_params TSRMLS_CC) == FAILURE){
+  ZVAL_STRINGL(&func, "executeprocedure", sizeof("executeprocedure") - 1);
+  if (call_user_function(NULL, object, &func, &return_val, 2, exec_params) == FAILURE){
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::executeprocedure()");
     return ;
   }
 
-  if (Z_LVAL_P(return_val) == -32601){
-    add_assoc_long(error, "code", -32601);
-    add_assoc_string(error, "message", "Method not found", 0);
-    add_assoc_null(id,"id");
-    add_assoc_zval(data, "error", error);
+  if (Z_LVAL(return_val) == -32601){
+    add_assoc_long(&error, "code", -32601);
+    add_assoc_string(&error, "message", "Method not found");
+    add_assoc_null(&id,"id");
+    add_assoc_zval(&data, "error", &error);
     goto getresponse;
   }
 
-  RETVAL_ZVAL(return_val, 1, 0);
-  add_assoc_zval(data, "result", return_val);
-  id = payload;
+  RETVAL_ZVAL(&return_val, 1, 0);
+  add_assoc_zval(&data, "result", &return_val);
+  id = *payload;
   efree(exec_params);
   goto getresponse;
 
   return ;
 
 getresponse:
-  func_params = emalloc(sizeof(zval *) * 2);
+  func_params = emalloc(sizeof(zval) * 2);
   func_params[0] = data;
   func_params[1] = id;
   
-  ZVAL_STRINGL(func, "getresponse", sizeof("getresponse") - 1, 0);
-  if (call_user_function(NULL, &object, func, &retval, 2, func_params TSRMLS_CC) == FAILURE)
+  ZVAL_STRINGL(&func, "getresponse", sizeof("getresponse") - 1);
+  if (call_user_function(NULL, object, &func, &retval, 2, func_params) == FAILURE)
   {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::getresponse()");
     return ;
   }
 
   efree(func_params);
-  ZVAL_STRINGL(return_value, Z_STRVAL(retval), Z_STRLEN(retval), 1);
+  ZVAL_STRINGL(return_value, Z_STRVAL(retval), Z_STRLEN(retval));
   return ;
 
 }
@@ -515,8 +490,9 @@ PHP_METHOD(jsonrpc_server, jsonformat)
   zval *payload, *val;
   zval *object = getThis();
 
+  zval rv4;
   payload = zend_read_property(
-      php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, 0 TSRMLS_CC
+      php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, 0, &rv4
     );
 
   //shurrik_dump_zval(payload);
@@ -543,10 +519,10 @@ PHP_METHOD(jsonrpc_server, jsonformat)
     php_stream_close(stream);
     zend_update_property(php_jsonrpc_server_entry, object, "payload", sizeof(payload)-1, payload TSRMLS_CC);
     */
-
-    payload = _jsr_file_get_contents();
+    zval get_payload;
+    get_payload = _jsr_file_get_contents();
     
-    zend_update_property(php_jsonrpc_server_entry, object, "payload", sizeof(payload)-1, payload TSRMLS_CC);
+    zend_update_property(php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, &get_payload TSRMLS_CC);
   }
   if (Z_TYPE_P(payload) == IS_STRING){
     php_json_decode(payload, Z_STRVAL_P(payload), Z_STRLEN_P(payload), 1, 512 TSRMLS_CC);
@@ -554,7 +530,7 @@ PHP_METHOD(jsonrpc_server, jsonformat)
   if (Z_TYPE_P(payload) != IS_ARRAY){
     RETVAL_FALSE;
   }else {
-    zend_update_property(php_jsonrpc_server_entry, object, "payload", sizeof(payload)-1, payload TSRMLS_CC);
+    zend_update_property(php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, payload);
     RETVAL_TRUE;
   }
 }
@@ -563,14 +539,15 @@ PHP_METHOD(jsonrpc_server, rpcformat)
 {
   zval *payload;
   zval *object;
-  zval **method = NULL;
-  zval **jsonrpc = NULL;
-  zval **params = NULL;
+  zval *method = NULL;
+  zval *jsonrpc = NULL;
+  zval *params = NULL;
 
   object = getThis();
 
+  zval rv5;
   payload = zend_read_property(
-      php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, 0 TSRMLS_CC
+      php_jsonrpc_server_entry, object, "payload", sizeof("payload")-1, 0, &rv5
     );
 
   if (Z_TYPE_P(payload) != IS_ARRAY)
@@ -579,39 +556,42 @@ PHP_METHOD(jsonrpc_server, rpcformat)
     return ;
   }
 
-  if (!zend_symtable_exists(Z_ARRVAL_P(payload), "jsonrpc", strlen("jsonrpc")+1))
+  zend_string *tmp = zend_string_init("jsonrpc", sizeof("jsonrpc")-1, 0);
+  if (!zend_symtable_exists(Z_ARRVAL_P(payload), tmp)) 
   {
+    zend_string_release(tmp);
     RETVAL_LONG(-32600);
     return ;
   }
 
-  if (!zend_symtable_exists(Z_ARRVAL_P(payload), "method", strlen("method")+1))
+  tmp = zend_string_init("method", sizeof("method")-1, 0);
+  if (!zend_symtable_exists(Z_ARRVAL_P(payload), tmp))
   {
     RETVAL_LONG(-32601);
     return ;
   }
 
   //MAKE_STD_ZVAL(&method);
-  if (zend_hash_find(Z_ARRVAL_P(payload), "method", strlen("method")+1, (void **)&method) == FAILURE)
+  if ((method = zend_hash_str_find(Z_ARRVAL_P(payload), "method", sizeof("method")-1)) == NULL)
   {
     RETVAL_LONG(-32601);
     return ;
   }
 
-  if (Z_TYPE_PP(method) != IS_STRING)
+  if (Z_TYPE_P(method) != IS_STRING)
   {
     RETVAL_LONG(-32601);
     return ;
   }
 
   //MAKE_STD_ZVAL(&jsonrpc);
-  if (zend_hash_find(Z_ARRVAL_P(payload), "jsonrpc", strlen("jsonrpc")+1, (void **)&jsonrpc) == FAILURE)
+  if ((jsonrpc = zend_hash_str_find(Z_ARRVAL_P(payload), "jsonrpc", sizeof("jsonrpc")-1)) == NULL)
   {
     RETVAL_LONG(-32600);
     return ;
   }
 
-  if (strcmp(Z_STRVAL_PP(jsonrpc),"2.0") != 0)
+  if (strcmp(Z_STRVAL_P(jsonrpc),"2.0") != 0)
   {
     RETVAL_LONG(-32600);
     return ;
@@ -619,12 +599,12 @@ PHP_METHOD(jsonrpc_server, rpcformat)
 
   
   //MAKE_STD_ZVAL(&params);
-  if (zend_hash_find(Z_ARRVAL_P(payload), "params", strlen("params")+1, (void **)&params) == FAILURE)
+  if ((params = zend_hash_str_find(Z_ARRVAL_P(payload), "params", sizeof("params")-1)) == NULL)
   {
     RETVAL_LONG(-32602);
     return ;
   }
-  if (Z_TYPE_PP(params) != IS_ARRAY)
+  if (Z_TYPE_P(params) != IS_ARRAY)
   {
     RETVAL_LONG(-32602);
     return ;
@@ -641,10 +621,10 @@ PHP_METHOD(jsonrpc_server, executeprocedure)
   zval *callbacks;
   zval *classes;
   zval *object;
-  zval **func_params;
-  zval *func;
-  zval *retval;
-  zval **procedure_params;
+  zval *func_params;
+  zval func;
+  zval retval;
+  zval *procedure_params;
 
   object = getThis();
 
@@ -655,36 +635,35 @@ PHP_METHOD(jsonrpc_server, executeprocedure)
     return ;
   }
 
-
-  MAKE_STD_ZVAL(retval);
-    
+  zval rv6;
   callbacks = zend_read_property(
-      php_jsonrpc_server_entry, object, "callbacks", sizeof("callbacks")-1, 0 TSRMLS_CC
+      php_jsonrpc_server_entry, object, "callbacks", sizeof("callbacks")-1, 0, &rv6
     );
 
+  zval rv7;
   classes = zend_read_property(
-      php_jsonrpc_server_entry, object, "classes", sizeof("classes")-1, 0 TSRMLS_CC
+      php_jsonrpc_server_entry, object, "classes", sizeof("classes")-1, 0, &rv7
     );
 
-  if (zend_hash_exists(Z_ARRVAL_P(callbacks), Z_STRVAL_P(procedure), Z_STRLEN_P(procedure) + 1))
+  if (zend_hash_exists(Z_ARRVAL_P(callbacks), Z_STR_P(procedure)))
   {
-    if (zend_hash_find(Z_ARRVAL_P(callbacks), Z_STRVAL_P(procedure), Z_STRLEN_P(procedure)+1, (void **)&procedure_params) == FAILURE)
+    if ((procedure_params = zend_hash_find(Z_ARRVAL_P(callbacks), Z_STR_P(procedure))) == NULL)
     {
       php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::executecallback()");
-      ZVAL_LONG(retval, -32601);
-      RETVAL_ZVAL(retval, 1, 0);
+      ZVAL_LONG(&retval, -32601);
+      RETVAL_ZVAL(&retval, 1, 0);
       return ;
     }
-    MAKE_STD_ZVAL(func);
-    ZVAL_STRINGL(func, "executecallback", sizeof("executecallback") - 1, 1);
-    func_params = emalloc(sizeof(zval *) * 2);
+    
+    ZVAL_STRINGL(&func, "executecallback", sizeof("executecallback") - 1);
+    func_params = emalloc(sizeof(zval) * 2);
     //jsr_dump_zval(*procedure_params);
     func_params[0] = *procedure_params;
-    func_params[1] = params;
-    if (call_user_function(NULL, &object, func, retval, 2, func_params TSRMLS_CC) == FAILURE){
+    func_params[1] = *params;
+    if (call_user_function(NULL, object, &func, &retval, 2, func_params) == FAILURE){
       php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::executecallback()");
-      ZVAL_LONG(retval, -32601);
-      RETVAL_ZVAL(retval, 1, 0);
+      ZVAL_LONG(&retval, -32601);
+      RETVAL_ZVAL(&retval, 1, 0);
       return ;
     }
 
@@ -697,39 +676,38 @@ PHP_METHOD(jsonrpc_server, executeprocedure)
     //  RETVAL_NULL();
     //}
     //return ;
-    
-  }else if (zend_hash_exists(Z_ARRVAL_P(classes), Z_STRVAL_P(procedure), Z_STRLEN_P(procedure) + 1)){
-    if (zend_hash_find(Z_ARRVAL_P(classes), Z_STRVAL_P(procedure), Z_STRLEN_P(procedure)+1, (void **)&procedure_params) == FAILURE)
+  }else if (zend_hash_exists(Z_ARRVAL_P(classes), Z_STR_P(procedure))){
+    if ((procedure_params = zend_hash_find(Z_ARRVAL_P(classes), Z_STR_P(procedure))) == NULL) 
     {
       php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::executemethod()");
-      ZVAL_LONG(retval, -32601);
-      RETVAL_ZVAL(retval, 1, 0);
+      ZVAL_LONG(&retval, -32601);
+      RETVAL_ZVAL(&retval, 1, 0);
       return ;
     }
-    MAKE_STD_ZVAL(func);
-    ZVAL_STRINGL(func, "executemethod", sizeof("executemethod") - 1, 1);
-    func_params = emalloc(sizeof(zval *) * 3);
+    
+    ZVAL_STRINGL(&func, "executemethod", sizeof("executemethod") - 1);
+    func_params = emalloc(sizeof(zval) * 3);
     //jsr_dump_zval(*procedure_params);
-    zval **class, **method;
-    zend_hash_find(Z_ARRVAL_PP(procedure_params), "class", sizeof("class"), (void **)&class);
-    zend_hash_find(Z_ARRVAL_PP(procedure_params), "method", sizeof("method"), (void **)&method);
+    zval *class, *method;
+    class = zend_hash_str_find(Z_ARRVAL_P(procedure_params), "class", sizeof("class")-1);
+    method = zend_hash_str_find(Z_ARRVAL_P(procedure_params), "method", sizeof("method")-1);
     func_params[0] = *class;
     func_params[1] = *method;
-    func_params[2] = params;
-    if (call_user_function(NULL, &object, func, retval, 3, func_params TSRMLS_CC) == FAILURE){
+    func_params[2] = *params;
+    if (call_user_function(NULL, object, &func, &retval, 3, func_params) == FAILURE){
       php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling Jsonrpc_Server::executecallback()");
-      ZVAL_LONG(retval, -32601);
-      RETVAL_ZVAL(retval, 1, 0);
+      ZVAL_LONG(&retval, -32601);
+      RETVAL_ZVAL(&retval, 1, 0);
       return ;
     }
 
     efree(func_params);
 
   }else {
-    ZVAL_LONG(retval, -32601);
+    ZVAL_LONG(&retval, -32601);
   }
 
-  RETVAL_ZVAL(retval, 1, 0);
+  RETVAL_ZVAL(&retval, 1, 0);
   return ;
 }
 
@@ -743,13 +721,13 @@ PHP_METHOD(jsonrpc_server, executecallback)
   zval *reflection;
   
   int func_params_num;
-  zval **func_params;
+  zval *func_params;
 
   zval *method_params;
   zval *nb_required_params;
   zval *nb_max_params;
 
-  zval *closure_result_ptr = NULL;
+  zval closure_result_ptr;
 
   if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "zz", 
     &closure, &params) == FAILURE)
@@ -767,12 +745,12 @@ PHP_METHOD(jsonrpc_server, executecallback)
     return;
   }
 
-  MAKE_STD_ZVAL(closure_result_ptr);
+  
 
   func_params_num = _php_count_recursive(params, 0 TSRMLS_CC);
-  func_params = emalloc(sizeof(zval *) * func_params_num);
+  func_params = emalloc(sizeof(zval) * func_params_num);
 
-  zval              **current;
+  zval              *current;
   HashTable          *ph;
   int i = 0;
 
@@ -781,7 +759,7 @@ PHP_METHOD(jsonrpc_server, executecallback)
   }
 
   for (zend_hash_internal_pointer_reset(ph);
-     zend_hash_get_current_data(ph, (void **) &current) == SUCCESS;
+     (current = zend_hash_get_current_data(ph));
      zend_hash_move_forward(ph)
   ) {
     SEPARATE_ZVAL(current);
@@ -791,14 +769,14 @@ PHP_METHOD(jsonrpc_server, executecallback)
   }
 
   //shurrik_dump_zval(closure);
-  if (call_user_function(EG(function_table), NULL, closure, closure_result_ptr, func_params_num, func_params TSRMLS_CC) == FAILURE)
+  if (call_user_function(EG(function_table), NULL, closure, &closure_result_ptr, func_params_num, func_params) == FAILURE)
   {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling closure");
     return ;
   }
   efree(func_params);
 
-  RETVAL_ZVAL(closure_result_ptr, 1, 0);
+  RETVAL_ZVAL(&closure_result_ptr, 1, 0);
 
 
   /*MAKE_STD_ZVAL(robj)
@@ -853,13 +831,13 @@ PHP_METHOD(jsonrpc_server, executecallback)
 PHP_METHOD(jsonrpc_server, executemethod)
 {
   zval *class, *method, *params;
-  zval *zcallable = NULL;
-  char *func_name;
+  zval zcallable;
+  zend_string *func_name;
 
   int func_params_num;
-  zval **func_params;
+  zval *func_params;
 
-  zval *result_ptr = NULL;
+  zval result_ptr;
 
   if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "zzz", 
     &class, &method, &params) == FAILURE)
@@ -867,23 +845,22 @@ PHP_METHOD(jsonrpc_server, executemethod)
     return ;
   }
 
-  MAKE_STD_ZVAL(zcallable);
-  array_init(zcallable);
-  add_next_index_zval(zcallable, class);
-  add_next_index_zval(zcallable, method);
+  array_init(&zcallable);
+  add_next_index_zval(&zcallable, class);
+  add_next_index_zval(&zcallable, method);
 
-  if (!zcallable || !zend_is_callable(zcallable, 0, &func_name TSRMLS_CC)){
-    php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s is not exist", func_name);
+  if ( !zend_is_callable(&zcallable, 0, &func_name)){
+    php_error_docref(NULL TSRMLS_CC, E_WARNING, "%s is not exist", &func_name);
     RETVAL_FALSE;
     return;
   }
 
-  MAKE_STD_ZVAL(result_ptr);
+  
 
   func_params_num = _php_count_recursive(params, 0 TSRMLS_CC);
-  func_params = emalloc(sizeof(zval *) * func_params_num);
+  func_params = emalloc(sizeof(zval) * func_params_num);
 
-  zval              **current;
+  zval              *current;
   HashTable          *ph;
   int i = 0;
 
@@ -892,7 +869,7 @@ PHP_METHOD(jsonrpc_server, executemethod)
   }
 
   for (zend_hash_internal_pointer_reset(ph);
-     zend_hash_get_current_data(ph, (void **) &current) == SUCCESS;
+     (current = zend_hash_get_current_data(ph));
      zend_hash_move_forward(ph)
   ) {
     SEPARATE_ZVAL(current);
@@ -902,23 +879,23 @@ PHP_METHOD(jsonrpc_server, executemethod)
   }
 
   //shurrik_dump_zval(closure);
-  if (call_user_function(EG(function_table), NULL, zcallable, result_ptr, func_params_num, func_params TSRMLS_CC) == FAILURE)
+  if (call_user_function(EG(function_table), NULL, &zcallable, &result_ptr, func_params_num, func_params) == FAILURE)
   {
     php_error_docref(NULL TSRMLS_CC, E_WARNING, "Failed calling closure");
     return ;
   }
   efree(func_params);
 
-  RETVAL_ZVAL(result_ptr, 1, 0);
+  RETVAL_ZVAL(&result_ptr, 1, 0);
 }
 
 PHP_METHOD(jsonrpc_server, getresponse)
 {
   zval *data;
-  zval *key;
+  zval key;
   HashTable *payload;
-  zval *response;
-  zval **id = NULL;
+  zval response;
+  zval *id = NULL;
   smart_str buf = {0};
   sapi_header_line ctr = {0};
 
@@ -928,41 +905,39 @@ PHP_METHOD(jsonrpc_server, getresponse)
     return ;
   }
 
-  MAKE_STD_ZVAL(response);
-  array_init(response);
-  add_assoc_string(response, "jsonrpc", "2.0", 0);
+  array_init(&response);
+  add_assoc_string(&response, "jsonrpc", "2.0");
 
-  MAKE_STD_ZVAL(key);
-  ZVAL_STRING(key, "id", 0);
-  if (!zend_symtable_exists(payload, Z_STRVAL_P(key), Z_STRLEN_P(key) + 1))
+  ZVAL_STRING(&key, "id");
+  if (!zend_symtable_exists(payload, Z_STR(key)))
   {
   }else {
     
-    if (zend_hash_find(payload, "id", 3, (void **)&id ) == FAILURE)
+    if ((id = zend_hash_str_find(payload, "id", sizeof("id")-1)) == NULL)
     {
       //php_error_docref(NULL TSRMLS_CC, E_WARNING, "closeure is not expected to be a valid callback");
       //return ;
     }
 
-    if (Z_TYPE_PP(id) == IS_NULL){
-      add_assoc_null(response, "id");
-    }else if(Z_TYPE_PP(id) == IS_STRING){
-      convert_to_string(*id);
-      add_assoc_string(response, "id", Z_STRVAL_PP(id), 0);
-    }else if (Z_TYPE_PP(id) == IS_LONG){
-      convert_to_long(*id);
-      add_assoc_long(response, "id", Z_LVAL_PP(id));
+    if (Z_TYPE_P(id) == IS_NULL){
+      add_assoc_null(&response, "id");
+    }else if(Z_TYPE_P(id) == IS_STRING){
+      convert_to_string(id);
+      add_assoc_string(&response, "id", Z_STRVAL_P(id));
+    }else if (Z_TYPE_P(id) == IS_LONG){
+      convert_to_long(id);
+      add_assoc_long(&response, "id", Z_LVAL_P(id));
     }
   }
 
-  zend_hash_merge(Z_ARRVAL_P(response), Z_ARRVAL_P(data), NULL, NULL, sizeof(zval *), 1);
+  zend_hash_merge(Z_ARRVAL(response), Z_ARRVAL_P(data), NULL, 1);
 
   ctr.line = "Content-Type: application/json";
   ctr.line_len = strlen(ctr.line);
   sapi_header_op(SAPI_HEADER_REPLACE, &ctr TSRMLS_CC);
 
-  php_json_encode(&buf, response, 0 TSRMLS_CC);
-  ZVAL_STRINGL(return_value, buf.c, buf.len, 1);
+  php_json_encode(&buf, &response, 0 TSRMLS_CC);
+  ZVAL_STRINGL(return_value, ZSTR_VAL(buf.s), ZSTR_LEN(buf.s));
   smart_str_free(&buf);
 
 }

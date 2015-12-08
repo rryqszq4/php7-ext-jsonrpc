@@ -25,8 +25,8 @@
 
 static zend_class_entry *php_jsonrpc_server_entry;
 
-static int _php_count_recursive(zval *array, long mode TSRMLS_DC);
-static zval* _jsr_file_get_contents();
+static zend_long _php_count_recursive(zval *array, zend_long mode);
+static zval _jsr_file_get_contents();
 static zval* _jsr_server_get_arguments(zval *request_params, zval *method_params,
   int nb_required_params, int nb_max_params TSRMLS_DC);
 

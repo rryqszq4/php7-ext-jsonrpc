@@ -7,6 +7,15 @@ Json-RPC 2.0 client/server for php-7 extension.
 
 [php5.3~php5.6](https://github.com/rryqszq4/JsonRPC)
 
+Features
+--------
+* JSON-RPC 2.0 protocol
+* Base on curl and epoll of the multi client
+* Persistent epoll in php-fpm
+* Persistent curl_multi queue in php-fpm
+* Support message and notifi notification
+* Linux only(need to epoll)
+
 Requirement
 -----------
 - PHP 7.0

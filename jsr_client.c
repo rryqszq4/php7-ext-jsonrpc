@@ -236,7 +236,7 @@ _write_callback(char *ptr, size_t size, size_t nmemb, void *ctx)
         buffer = malloc(Z_STRLEN_P(response_data) + length + 1);
         strncpy(buffer, Z_STRVAL_P(response_data), Z_STRLEN_P(response_data)+1);
         strncat(buffer, ptr, length);
-        add_index_stringl(response, item->response_id, buffer, Z_STRLEN_PP(response_data) + length);
+        add_index_stringl(response, item->response_id, buffer, Z_STRLEN_P(response_data) + length);
         if (buffer){
           free(buffer);
           buffer = NULL;
